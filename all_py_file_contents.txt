@@ -1,0 +1,34 @@
+===== Project Directory Structure =====
+.
+├── FastAPI.png
+├── README.md
+├── ReactApp.png
+├── RecommedAPI.png
+├── all_py_file_contents.txt
+├── backend
+│   ├── data
+│   │   └── imdb_top_1000.csv
+│   ├── main.py
+│   ├── models
+│   ├── recommender.py
+│   ├── requirements.txt
+│   └── train_models.py
+└── frontend
+    ├── index.html
+    ├── package-lock.json
+    ├── package.json
+    ├── postcss.config.js
+    ├── src
+    │   ├── App.jsx
+    │   ├── components
+    │   │   ├── AlgorithmSelector.jsx
+    │   │   ├── ComparisonChart.jsx
+    │   │   ├── CosineSimilarityExplainer.jsx
+    │   │   ├── Header.jsx
+    │   │   ├── MovieCard.jsx
+    │   │   ├── MovieGrid.jsx
+    │   │   └── MovieSearch.jsx
+    │   ├── index.css
+    │   └── main.jsx
+    ├── tailwind.config.js
+    └── vite.config.js
