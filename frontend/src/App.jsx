@@ -8,7 +8,8 @@ import MovieSearch from './components/MovieSearch'
 import MovieGrid from './components/MovieGrid'
 import ComparisonChart from './components/ComparisonChart'
 
-const API = '/api'
+// const API = '/api'
+const API = import.meta.env.VITE_API_URL
 
 export default function App() {
   const [movies, setMovies]               = useState([])
