@@ -86,6 +86,8 @@ class MovieRecommender:
     def __init__(self, csv_path: str):
         print("📂 Loading movie data...")
         self.df = pd.read_csv(csv_path)
+        print("DATA LOADED:", self.df.shape)
+        print(self.df.head())
         self.titles = self.df["Series_Title"].tolist()
         self._prepare_text()
         self._build_all_models()
