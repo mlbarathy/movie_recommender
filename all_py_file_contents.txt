@@ -1,34 +1,667 @@
 ===== Project Directory Structure =====
 .
-├── FastAPI.png
-├── README.md
-├── ReactApp.png
-├── RecommedAPI.png
-├── all_py_file_contents.txt
-├── backend
-│   ├── data
-│   │   └── imdb_top_1000.csv
-│   ├── main.py
-│   ├── models
-│   ├── recommender.py
-│   ├── requirements.txt
-│   └── train_models.py
-└── frontend
-    ├── index.html
-    ├── package-lock.json
-    ├── package.json
-    ├── postcss.config.js
-    ├── src
-    │   ├── App.jsx
-    │   ├── components
-    │   │   ├── AlgorithmSelector.jsx
-    │   │   ├── ComparisonChart.jsx
-    │   │   ├── CosineSimilarityExplainer.jsx
-    │   │   ├── Header.jsx
-    │   │   ├── MovieCard.jsx
-    │   │   ├── MovieGrid.jsx
-    │   │   └── MovieSearch.jsx
-    │   ├── index.css
-    │   └── main.jsx
-    ├── tailwind.config.js
-    └── vite.config.js
+|-- README.md
+|-- backend
+|   |-- data
+|   |   `-- imdb_top_1000.csv
+|   |-- main.py
+|   |-- recommender.py
+|   |-- requirements.txt
+|   |-- runtime.txt
+|   `-- train_models.py
+|-- collect_files.sh
+`-- frontend
+    |-- index.html
+    |-- package-lock.json
+    |-- package.json
+    |-- postcss.config.js
+    |-- src
+    |   |-- App.jsx
+    |   |-- components
+    |   |   |-- AlgorithmSelector.jsx
+    |   |   |-- ComparisonChart.jsx
+    |   |   |-- CosineSimilarityExplainer.jsx
+    |   |   |-- Header.jsx
+    |   |   |-- MovieCard.jsx
+    |   |   |-- MovieGrid.jsx
+    |   |   `-- MovieSearch.jsx
+    |   |-- index.css
+    |   `-- main.jsx
+    |-- tailwind.config.js
+    `-- vite.config.js
+
+6 directories, 24 files
+
+
+===== Python File Contents Below =====
+
+
+Contents of: ./backend/main.py :
+=====================================
+"""
+main.py — FastAPI backend for the CineMatch movie recommender.
+
+Run with: uvicorn main:app --reload --port 8000
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from recommender import MovieRecommender, ALGORITHM_INFO
+import os
+
+# ─────────────────────────────────────────────────────────
+# App setup
+# ─────────────────────────────────────────────────────────
+app = FastAPI(
+    title="CineMatch API",
+    description="Movie recommendations using 5 different text embedding methods",
+    version="1.0.0",
+)
+
+# Allow React frontend to call this API (CORS)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # later restrict to frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────────────────────────
+# Load recommender on startup (builds all 6 models)
+# ─────────────────────────────────────────────────────────
+CSV_PATH = os.path.join(os.path.dirname(__file__), "data", "imdb_top_1000.csv")
+recommender = MovieRecommender(CSV_PATH)
+
+
+# ─────────────────────────────────────────────────────────
+# Request / Response models
+# ─────────────────────────────────────────────────────────
+class RecommendRequest(BaseModel):
+    movie: str
+    method: str = "tfidf"
+    top_n: int = 10
+
+
+class CompareRequest(BaseModel):
+    movie: str
+    top_n: int = 8
+
+
+# ─────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "movies_loaded": len(recommender.get_titles())}
+
+
+@app.get("/movies")
+def list_movies():
+    """Return all movie titles (for the search dropdown)."""
+    return {"movies": recommender.get_titles()}
+
+
+@app.get("/algorithms")
+def list_algorithms():
+    """Return metadata for each algorithm (displayed in the UI)."""
+    return recommender.algorithm_info()
+
+
+@app.post("/recommend")
+def recommend(req: RecommendRequest):
+    """
+    Get top-N movie recommendations for a given movie using one method.
+
+    Methods: bow | tfidf | word2vec | glove | fasttext
+    """
+    valid_methods = ["bow", "tfidf", "word2vec", "glove", "fasttext"]
+    if req.method not in valid_methods:
+        raise HTTPException(status_code=400, detail=f"method must be one of {valid_methods}")
+
+    results = recommender.recommend(req.movie, method=req.method, top_n=req.top_n)
+    if not results:
+        raise HTTPException(status_code=404, detail=f"Movie '{req.movie}' not found")
+
+    return {
+        "query": req.movie,
+        "method": req.method,
+        "algorithm": ALGORITHM_INFO[req.method]["name"],
+        "recommendations": results,
+    }
+
+
+@app.post("/compare")
+def compare(req: CompareRequest):
+    """
+    Run ALL 5 methods on the same movie and return all results for comparison.
+    """
+    all_results = recommender.compare_all(req.movie, top_n=req.top_n)
+    if not any(all_results.values()):
+        raise HTTPException(status_code=404, detail=f"Movie '{req.movie}' not found")
+
+    return {
+        "query": req.movie,
+        "results": all_results,
+        "algorithms": ALGORITHM_INFO,
+    }
+
+
+Contents of: ./backend/recommender.py :
+=====================================
+"""
+recommender.py — Text embedding methods for movie recommendation.
+
+Every method converts text → numbers, then uses cosine similarity to find similar movies.
+That's the one constant: representation changes, similarity measure stays the same.
+
+Methods covered: BoW · TF-IDF · Word2Vec (CBOW) · GloVe · FastText
+Note: Transformer-based embeddings (SBERT/BERT) are covered in the Attention session.
+"""
+
+import re
+import os
+import ssl
+import certifi
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import gensim.downloader as api
+
+# Fix macOS SSL certificate issue so gensim can download pre-trained models
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+# ─────────────────────────────────────────────────────────
+# Algorithm metadata shown in the frontend
+# ─────────────────────────────────────────────────────────
+ALGORITHM_INFO = {
+    "bow": {
+        "name": "Bag of Words",
+        "year": "1954",
+        "color": "#ef4444",
+        "tagline": "Counts word occurrences — order doesn't matter",
+        "pro": "Simple, fast, interpretable",
+        "con": "Ignores word order and semantics; 'dog bites man' = 'man bites dog'",
+        "formula": "V[word] = count of word in document",
+    },
+    "tfidf": {
+        "name": "TF-IDF",
+        "year": "1972",
+        "color": "#f59e0b",
+        "tagline": "Rare words matter more than common ones",
+        "pro": "Weights important/unique words higher automatically",
+        "con": "Still bag-of-words; no semantic understanding",
+        "formula": "TF-IDF = TF(t,d) × log(N / df(t))",
+    },
+    "word2vec": {
+        "name": "Word2Vec (Google News)",
+        "year": "2013",
+        "color": "#10b981",
+        "tagline": "Pre-trained on 100B Google News words — 3M vocab, 300d",
+        "pro": "'king - man + woman ≈ queen' — rich real-world semantics",
+        "con": "No subword model — OOV words get zero vector",
+        "formula": "P(center | context) → trained weights become vectors",
+    },
+    "glove": {
+        "name": "GloVe",
+        "year": "2014",
+        "color": "#6366f1",
+        "tagline": "Global co-occurrence statistics + local context",
+        "pro": "Stable, rich pre-trained vectors from 6B words",
+        "con": "One vector per word — polysemy not handled ('bank')",
+        "formula": "u·v ≈ log P(word_i | word_j)",
+    },
+    "fasttext": {
+        "name": "FastText (Wiki News)",
+        "year": "2016",
+        "color": "#ec4899",
+        "tagline": "Pre-trained on Wikipedia + news — 1M vocab, 300d subwords",
+        "pro": "Handles OOV words via character n-grams — typos still work!",
+        "con": "Subword noise can hurt very short movie descriptions",
+        "formula": "word_vector = avg of character n-gram vectors",
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────
+# Core Recommender Class
+# ─────────────────────────────────────────────────────────
+class MovieRecommender:
+    """
+    Builds 5 different text representations of 1000 movies.
+    Then lets you compare how each one ranks similar movies.
+    """
+
+    def __init__(self, csv_path: str):
+        print("📂 Loading movie data...")
+        self.df = pd.read_csv(csv_path)
+        self.titles = self.df["Series_Title"].tolist()
+        self._prepare_text()
+        self._build_all_models()
+        print("✅ All models ready — recommender is live!")
+
+    # ─── Text preprocessing ───────────────────────────────
+
+    def _clean(self, text: str) -> str:
+        """Lowercase, remove punctuation/numbers, strip extra whitespace."""
+        text = str(text).lower()
+        text = re.sub(r"[^a-z\s]", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _prepare_text(self):
+        """Combine relevant metadata into one text field per movie."""
+        self.df["combined"] = (
+            self.df["Overview"].fillna("") + " " +
+            self.df["Genre"].fillna("") + " " +
+            self.df["Director"].fillna("") + " " +
+            self.df["Star1"].fillna("") + " " +
+            self.df["Star2"].fillna("")
+        )
+        self.df["text_clean"] = self.df["combined"].apply(self._clean)
+        self.corpus = self.df["text_clean"].tolist()
+        # Tokenized version for Word2Vec / FastText
+        self.tokenized = [doc.split() for doc in self.corpus]
+
+    # ─── Build all similarity matrices ───────────────────
+
+    def _build_all_models(self):
+        self._build_bow()
+        self._build_tfidf()
+        # Skip large gensim downloads (Word2Vec ~1.6 GB, FastText ~1 GB) for fast local dev.
+        # Full behavior: unset CINEMATCH_LIGHT or set to 0/false.
+        light = os.environ.get("CINEMATCH_LIGHT", "").strip().lower() in ("1", "true", "yes")
+        if light:
+            print(
+                "  [3–5/5] CINEMATCH_LIGHT=1 — skipping pre-trained downloads; "
+                "word2vec / glove / fasttext use TF-IDF similarity matrices."
+            )
+            self.sim_w2v = self.sim_tfidf.copy()
+            self.sim_glove = self.sim_tfidf.copy()
+            self.sim_fasttext = self.sim_tfidf.copy()
+            return
+        self._build_word2vec()
+        self._build_glove()
+        self._build_fasttext()
+
+    def _build_bow(self):
+        print("  [1/5] Building Bag-of-Words model...")
+        vec = CountVectorizer(max_features=8000, stop_words="english")
+        matrix = vec.fit_transform(self.corpus)
+        self.sim_bow = cosine_similarity(matrix)
+
+    def _build_tfidf(self):
+        print("  [2/5] Building TF-IDF model...")
+        vec = TfidfVectorizer(max_features=8000, ngram_range=(1, 2), stop_words="english")
+        matrix = vec.fit_transform(self.corpus)
+        self.sim_tfidf = cosine_similarity(matrix)
+
+    def _avg_vectors(self, model_wv, size: int) -> np.ndarray:
+        """Average word vectors across each document."""
+        vecs = []
+        for tokens in self.tokenized:
+            token_vecs = [model_wv[w] for w in tokens if w in model_wv]
+            vecs.append(np.mean(token_vecs, axis=0) if token_vecs else np.zeros(size))
+        return np.array(vecs)
+
+    def _build_word2vec(self):
+        print("  [3/5] Loading pre-trained Google News Word2Vec (300d, ~1.6 GB, cached after first run)...")
+        try:
+            wv = api.load("word2vec-google-news-300")  # KeyedVectors, 3M vocab
+            matrix = self._avg_vectors(wv, 300)
+            self.sim_w2v = cosine_similarity(matrix)
+        except Exception as e:
+            print(f"  ⚠️  Google News Word2Vec download failed ({e}). Falling back to TF-IDF.")
+            self.sim_w2v = self.sim_tfidf.copy()
+
+    def _build_glove(self):
+        print("  [4/5] Loading pre-trained GloVe vectors (~66 MB, cached after first run)...")
+        try:
+            glove = api.load("glove-wiki-gigaword-50")
+            matrix = self._avg_vectors(glove, 50)
+            self.sim_glove = cosine_similarity(matrix)
+        except Exception as e:
+            print(f"  ⚠️  GloVe download failed ({e}). Falling back to TF-IDF for GloVe slot.")
+            self.sim_glove = self.sim_tfidf.copy()
+
+    def _build_fasttext(self):
+        print("  [5/5] Loading pre-trained FastText wiki-news vectors (300d, ~958 MB, cached after first run)...")
+        try:
+            wv = api.load("fasttext-wiki-news-subwords-300")  # KeyedVectors, 1M vocab + subwords
+            matrix = self._avg_vectors(wv, 300)
+            self.sim_fasttext = cosine_similarity(matrix)
+        except Exception as e:
+            print(f"  ⚠️  FastText pre-trained download failed ({e}). Falling back to TF-IDF.")
+            self.sim_fasttext = self.sim_tfidf.copy()
+
+    # ─── Recommendation logic ─────────────────────────────
+
+    _SIM_MAP = {
+        "bow":      lambda self: self.sim_bow,
+        "tfidf":    lambda self: self.sim_tfidf,
+        "word2vec": lambda self: self.sim_w2v,
+        "glove":    lambda self: self.sim_glove,
+        "fasttext": lambda self: self.sim_fasttext,
+    }
+
+    def _movie_to_dict(self, row, similarity: float) -> dict:
+        # Upgrade the tiny 67×98 thumbnail to a full-quality poster (~400px wide)
+        poster = str(row.get("Poster_Link", ""))
+        poster = re.sub(r'_V1_.*\.jpg$', '_V1_SX400_.jpg', poster)
+        return {
+            "title":      str(row["Series_Title"]),
+            "year":       str(row.get("Released_Year", "N/A")),
+            "rating":     str(row.get("IMDB_Rating", "N/A")),
+            "genre":      str(row.get("Genre", "N/A")),
+            "overview":   str(row.get("Overview", "No overview available")),
+            "director":   str(row.get("Director", "N/A")),
+            "runtime":    str(row.get("Runtime", "N/A")),
+            "poster":     poster,
+            "stars":      [
+                str(row.get(f"Star{i}", ""))
+                for i in range(1, 5)
+                if str(row.get(f"Star{i}", "")) not in ("", "nan")
+            ],
+            "similarity": round(float(similarity), 4),
+        }
+
+    def recommend(self, movie_title: str, method: str = "tfidf", top_n: int = 10) -> list:
+        """Return top_n similar movies using the chosen method."""
+        if method not in self._SIM_MAP:
+            raise ValueError(f"Unknown method '{method}'. Choose from: {list(self._SIM_MAP)}")
+        try:
+            idx = self.titles.index(movie_title)
+        except ValueError:
+            return []
+
+        sim_matrix = self._SIM_MAP[method](self)
+        scores = sim_matrix[idx]
+        ranked = np.argsort(-scores)
+        top_indices = [i for i in ranked if i != idx][:top_n]
+
+        return [self._movie_to_dict(self.df.iloc[i], scores[i]) for i in top_indices]
+
+    def compare_all(self, movie_title: str, top_n: int = 8) -> dict:
+        """Run all 5 methods and return their top recommendations."""
+        return {
+            method: self.recommend(movie_title, method=method, top_n=top_n)
+            for method in self._SIM_MAP
+        }
+
+    def get_titles(self) -> list:
+        return self.titles
+
+    def algorithm_info(self) -> dict:
+        return ALGORITHM_INFO
+
+
+Contents of: ./backend/train_models.py :
+=====================================
+"""
+train_models.py — Train custom Word2Vec and FastText models on the IMDB movie corpus.
+
+WHY TRAIN FROM SCRATCH?
+  - Tiny model (~2 MB) vs ~1.6 GB for pre-trained Google News Word2Vec
+  - Domain-specific vocabulary ("nolan", "blockbuster", genre names)
+  - Trains in seconds on 1,000 movies
+  - Best for learning: you see exactly how the algorithm works
+
+DOWNSIDE:
+  - Trained on only 1,000 short descriptions vs billions of web sentences
+  - Pre-trained vectors from gensim.downloader have much richer semantics
+  - Use pre-trained for production; custom-trained for learning and experimentation
+
+USAGE:
+    cd backend
+    python train_models.py
+
+OUTPUT:
+    backend/models/word2vec_movies.model   ← saved Word2Vec
+    backend/models/fasttext_movies.model  ← saved FastText
+
+PRE-TRAINED MODELS (used by the recommender on startup):
+    These are downloaded automatically via gensim.downloader and cached in ~/gensim-data/
+    - GloVe:      glove-wiki-gigaword-50            (~66 MB)
+    - FastText:   fasttext-wiki-news-subwords-300   (~958 MB)
+    - Word2Vec:   word2vec-google-news-300          (~1.6 GB)
+"""
+
+import os
+import re
+import pandas as pd
+from gensim.models import Word2Vec, FastText
+import gensim.downloader as api
+
+
+# ─────────────────────────────────────────────────────────
+# STEP 1 — Load and preprocess the movie dataset
+# ─────────────────────────────────────────────────────────
+
+# Resolve the CSV path relative to this script (works from any working directory)
+CSV_PATH = os.path.join(os.path.dirname(__file__), "data", "imdb_top_1000.csv")
+
+if not os.path.exists(CSV_PATH):
+    raise FileNotFoundError(
+        f"\n\n❌ Dataset not found at: {CSV_PATH}\n"
+        "   Download imdb_top_1000.csv from Kaggle and place it in backend/data/\n"
+        "   https://www.kaggle.com/datasets/harshitshankhdhar/imdb-dataset-of-top-1000-movies-and-tv-shows\n"
+    )
+
+print("📂 Loading movie data...")
+df = pd.read_csv(CSV_PATH)
+print(f"   Loaded {len(df)} movies")
+
+
+def clean_text(text: str) -> str:
+    """Lowercase, remove punctuation/numbers, strip extra whitespace."""
+    text = str(text).lower()
+    text = re.sub(r"[^a-z\s]", " ", text)   # keep only letters and spaces
+    return re.sub(r"\s+", " ", text).strip()  # collapse multiple spaces
+
+
+# Combine overview + genre + director + top cast into one text blob per movie
+# (Same preprocessing as recommender.py — keeps custom model consistent)
+df["combined"] = (
+    df["Overview"].fillna("") + " " +
+    df["Genre"].fillna("") + " " +
+    df["Director"].fillna("") + " " +
+    df["Star1"].fillna("") + " " +
+    df["Star2"].fillna("")
+)
+df["text_clean"] = df["combined"].apply(clean_text)
+
+# gensim Word2Vec and FastText both expect:
+#   sentences = list of lists of string tokens
+#   e.g. [["the", "dark", "knight", "rises", ...], ["inception", ...], ...]
+corpus = [doc.split() for doc in df["text_clean"].tolist()]
+
+print(f"   Sample tokens from first movie: {corpus[0][:10]}")
+print(f"   Total documents: {len(corpus)}")
+
+
+# ─────────────────────────────────────────────────────────
+# STEP 2 — Create the output directory
+# ─────────────────────────────────────────────────────────
+
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+os.makedirs(MODELS_DIR, exist_ok=True)  # creates the folder if it doesn't exist yet
+
+
+# ─────────────────────────────────────────────────────────
+# STEP 3 — Train Word2Vec from scratch
+# ─────────────────────────────────────────────────────────
+# Word2Vec learns word meanings by predicting context words.
+# Core idea: "You shall know a word by the company it keeps." — Firth (1957)
+#
+# Two training modes:
+#   sg=0  →  CBOW: predict the CENTER word from surrounding context
+#   sg=1  →  Skip-gram: predict CONTEXT words from the center word
+#            (Skip-gram works better for rare words)
+
+print("\n[1/2] Training Word2Vec on movie corpus...")
+
+w2v_model = Word2Vec(
+    sentences=corpus,   # list-of-lists of tokens (our 1,000 movie descriptions)
+    vector_size=100,    # number of dimensions for each word vector
+                        # (100 = lightweight; use 300 to match pre-trained Google News)
+    window=5,           # context window: how many words left/right to consider
+                        # e.g. window=5 means 5 words before and 5 words after
+    min_count=1,        # ignore words that appear fewer than this many times
+                        # (set to 1 to keep all words in our small corpus)
+    workers=4,          # parallel CPU threads for training
+    epochs=20,          # how many full passes over the corpus during training
+                        # more epochs = slower but potentially better quality
+    sg=0,               # 0 = CBOW (faster); 1 = Skip-gram (better for rare words)
+    seed=42,            # fixed seed for reproducible results
+)
+
+# Save the full model (preserves training state; can resume training later)
+W2V_PATH = os.path.join(MODELS_DIR, "word2vec_movies.model")
+w2v_model.save(W2V_PATH)
+print(f"   ✅ Saved → {W2V_PATH}")
+
+# Quick sanity check — verify the model learned something
+try:
+    sample_vec = w2v_model.wv["action"]
+    print(f"   'action' vector shape: {sample_vec.shape} (first 5 dims: {sample_vec[:5].round(3)})")
+    similar = w2v_model.wv.most_similar("thriller", topn=5)
+    print(f"   Words most similar to 'thriller': {[w for w, _ in similar]}")
+except KeyError as e:
+    print(f"   (Word not in corpus vocabulary: {e})")
+
+
+# ─────────────────────────────────────────────────────────
+# STEP 4 — Train FastText from scratch
+# ─────────────────────────────────────────────────────────
+# FastText extends Word2Vec with character n-gram subword embeddings.
+#
+# KEY ADVANTAGE: can represent ANY word, even ones never seen during training.
+# How? "cinematographic" is built from overlapping character fragments:
+#   min_n=3:  "cin", "ine", "nem", "ema", "mat", ...
+#   max_n=6:  "cinema", "inemat", "nemato", ...
+# The word vector = average of all its character n-gram vectors.
+#
+# This is why FastText handles typos and rare words so well.
+
+print("\n[2/2] Training FastText on movie corpus...")
+
+ft_model = FastText(
+    sentences=corpus,   # same tokenized corpus as Word2Vec
+    vector_size=100,    # embedding dimensions (match Word2Vec for fair comparison)
+    window=5,           # context window size
+    min_count=1,        # minimum word frequency
+    workers=4,          # parallel CPU threads
+    epochs=20,          # training passes over the corpus
+    min_n=3,            # minimum character n-gram length (e.g. "act", "ion")
+    max_n=6,            # maximum character n-gram length (e.g. "action")
+                        # larger max_n = more subword fragments = slower but handles
+                        # longer rare words better
+    seed=42,
+)
+
+FT_PATH = os.path.join(MODELS_DIR, "fasttext_movies.model")
+ft_model.save(FT_PATH)
+print(f"   ✅ Saved → {FT_PATH}")
+
+try:
+    print(f"   'drama' vector shape: {ft_model.wv['drama'].shape}")
+    # FastText's killer feature: it can handle out-of-vocabulary words
+    # "cinematographic" was never in our 1,000 movie descriptions, but
+    # FastText builds its vector from character n-grams it has seen
+    oov_vec = ft_model.wv["cinematographic"]
+    print(f"   OOV test — 'cinematographic' (not in corpus): vector shape = {oov_vec.shape} ✅")
+except Exception as e:
+    print(f"   (Test skipped: {e})")
+
+
+# ─────────────────────────────────────────────────────────
+# HOW TO RELOAD A SAVED MODEL
+# ─────────────────────────────────────────────────────────
+# After running this script, you can reload models in any Python session:
+#
+#   from gensim.models import Word2Vec, FastText
+#
+#   # Load Word2Vec
+#   w2v = Word2Vec.load("models/word2vec_movies.model")
+#   wv  = w2v.wv          # wv = KeyedVectors (the actual embedding table)
+#   print(wv["action"])   # 100-dimensional numpy array
+#   print(wv.most_similar("thriller", topn=5))
+#
+#   # Load FastText
+#   ft  = FastText.load("models/fasttext_movies.model")
+#   ftv = ft.wv
+#   print(ftv["cinematographic"])  # works even for OOV words
+
+print("\n--- Reload test ---")
+loaded_w2v = Word2Vec.load(W2V_PATH)
+wv = loaded_w2v.wv   # KeyedVectors: the actual lookup table
+print(f"   Word2Vec vocab size: {len(wv)}")
+try:
+    print(f"   'director' most similar: {wv.most_similar('director', topn=3)}")
+except KeyError:
+    print("   ('director' not in vocabulary)")
+
+loaded_ft = FastText.load(FT_PATH)
+ftv = loaded_ft.wv
+print(f"   FastText vocab size: {len(ftv)}")
+
+
+# ─────────────────────────────────────────────────────────
+# HOW TO DOWNLOAD AND USE PRE-TRAINED GLOVE / FASTTEXT
+# ─────────────────────────────────────────────────────────
+# The main recommender.py uses gensim.downloader automatically on startup.
+# To use pre-trained vectors in your own code:
+#
+#   import gensim.downloader as api
+#
+#   # GloVe — Stanford, 50d, trained on 6B Wikipedia + Gigaword words (~66 MB)
+#   glove = api.load("glove-wiki-gigaword-50")
+#   print(glove["action"])                        # 50-dim vector
+#   print(glove.most_similar("hero", topn=5))
+#
+#   # FastText — Facebook, 300d + subwords, trained on Wiki + News (~958 MB)
+#   fasttext = api.load("fasttext-wiki-news-subwords-300")
+#   print(fasttext["cinematography"])             # works for rare words
+#   print(fasttext.most_similar("thriller", topn=5))
+#
+#   # Word2Vec — Google News, 300d, 3M vocab, 100B words (~1.6 GB)
+#   word2vec = api.load("word2vec-google-news-300")
+#   print(word2vec.most_similar("king", topn=5))
+#
+# All models cache to ~/gensim-data/ after first download.
+# List all available models: print(list(api.info()["models"].keys()))
+
+
+# ─────────────────────────────────────────────────────────
+# HOW TO USE A CUSTOM MODEL IN THE RECOMMENDER
+# ─────────────────────────────────────────────────────────
+# To swap the pre-trained Word2Vec for your custom-trained model,
+# edit recommender.py and replace _build_word2vec() with:
+#
+#   def _build_word2vec(self):
+#       from gensim.models import Word2Vec as GensimW2V
+#       model = GensimW2V.load("models/word2vec_movies.model")
+#       # IMPORTANT: vector_size must match what you trained (100 here, not 300)
+#       matrix = self._avg_vectors(model.wv, size=100)
+#       self.sim_w2v = cosine_similarity(matrix)
+#
+# And similarly for FastText:
+#
+#   def _build_fasttext(self):
+#       from gensim.models import FastText as GensimFT
+#       model = GensimFT.load("models/fasttext_movies.model")
+#       matrix = self._avg_vectors(model.wv, size=100)
+#       self.sim_fasttext = cosine_similarity(matrix)
+#
+# KEY RULE: the `size` argument to _avg_vectors() must match vector_size from training.
+
+
+print("\n" + "="*60)
+print("✅ Training complete!")
+print(f"   Word2Vec  → {W2V_PATH}")
+print(f"   FastText  → {FT_PATH}")
+print("\nTo start the recommender with pre-trained models:")
+print("   uvicorn main:app --reload --port 8000")
+print("="*60)

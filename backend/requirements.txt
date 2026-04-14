@@ -6,4 +6,5 @@ pandas==2.2.2
 numpy==1.26.4
 scikit-learn==1.4.2
 gensim==4.3.2
+scipy==1.11.4
 certifi==2024.2.2
