@@ -9,7 +9,7 @@ import MovieGrid from './components/MovieGrid'
 import ComparisonChart from './components/ComparisonChart'
 
 // const API = '/api'
-const API = import.meta.env.VITE_API_URL
+const API = "https://movie-recommender-backend-lzaj.onrender.com"
 
 export default function App() {
   const [movies, setMovies]               = useState([])
