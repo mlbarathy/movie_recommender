@@ -22,7 +22,8 @@ app = FastAPI(
 # Allow React frontend to call this API (CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production: specify your frontend URL
+    allow_origins=["*"],  # later restrict to frontend URL
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
